@@ -17,3 +17,6 @@ __pycache__/
 # --- OS Generated Files (可选) ---
 .DS_Store
 Thumbs.db
+build/
+*.spec
+dist/

@@ -7,6 +7,12 @@ platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
 python = "3.11.*"
 numpy = "*"
 matplotlib = "*"
+pyinstaller = "*"
 
 [tasks]
 start = "python main.py"
+# --onefile: 打包成单个exe文件
+# --clean: 清理缓存
+# --name: 指定生成的文件名
+# --windowed: (可选) 隐藏黑色命令行窗口。注意：用了这个就看不到 print 的日志了！
+build = "pyinstaller --onefile --clean --name APF_Demonstration main.py"
