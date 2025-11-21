@@ -1,18 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Button
 
 class APF_Robot:
-    def __init__(self, start, goal, obstacles, k_att=5.0, k_rep=100.0, rr=2.0, step_size=0.1):
-        """
-        :param start: 起点 [x, y]
-        :param goal: 终点 [x, y]
-        :param obstacles: 障碍物列表 [[x, y, radius], ...]
-        :param k_att: 引力增益系数
-        :param k_rep: 斥力增益系数
-        :param rr: 斥力影响半径 (Repulsive Radius)
-        :param step_size: 模拟步长
-        """
+    def __init__(self, start, goal, obstacles, k_att=2.0, k_rep=80.0, rr=3.0, step_size=0.1, enable_escape=False):
         self.pos = np.array(start, dtype=float)
         self.goal = np.array(goal, dtype=float)
         self.obstacles = obstacles
@@ -21,117 +13,212 @@ class APF_Robot:
         self.rr = rr
         self.step_size = step_size
         
+        self.enable_escape = enable_escape
         self.path = [self.pos.copy()]
         self.is_reached = False
-
-    def calculate_attractive_force(self):
-        """计算引力: F_att = -k_att * (q - q_goal)"""
-        return -self.k_att * (self.pos - self.goal)
+        
+        # 状态机变量
+        self.stuck_counter = 0
+        self.escape_timer = 0
+        self.escape_force = np.zeros(2)
 
     def calculate_repulsive_force(self):
-        """计算斥力: F_rep"""
+        """单独计算斥力"""
         f_rep = np.zeros(2)
         for (ox, oy, r) in self.obstacles:
             obs_pos = np.array([ox, oy])
-            # 机器人到障碍物中心的距离
             dist_vec = self.pos - obs_pos
             dist = np.linalg.norm(dist_vec)
             
-            # 实际距离要减去障碍物自身的物理半径（视为圆形障碍物）
-            # 为了简化教学，这里假设障碍物是点，或者dist已经是表面距离
-            # 这里我们把dist视为到障碍物中心的距离，如果小于影响范围则产生斥力
-            
             if dist <= self.rr:
-                # 斥力方向：指向机器人（远离障碍物）
-                # 标准 APF 斥力公式求导后的力向量
+                # 斥力公式
                 rep_val = self.k_rep * (1.0/dist - 1.0/self.rr) * (1.0/(dist**2))
                 f_rep += rep_val * (dist_vec / dist)
-                
         return f_rep
 
+    def calculate_attractive_force(self):
+        """单独计算引力"""
+        return -self.k_att * (self.pos - self.goal)
+
     def step(self):
-        """执行一步移动"""
-        if self.is_reached:
-            return
+        if self.is_reached: return
 
-        # 1. 计算合力
-        f_att = self.calculate_attractive_force()
         f_rep = self.calculate_repulsive_force()
-        f_total = f_att + f_rep
 
-        # 2. 归一化合力方向并移动 (保持速度恒定，便于观察轨迹)
-        # 在实际物理中，力决定加速度，这里简化为决定速度方向
-        f_norm = np.linalg.norm(f_total)
-        if f_norm > 0:
-            direction = f_total / f_norm
-            self.pos += direction * self.step_size
+        # --- 模式 A: 逃逸模式 (Escape Mode) ---
+        if self.escape_timer > 0:
+            # 关键改进：逃逸时，保留斥力！
+            # 这样机器人如果随机撞向墙壁，斥力会把它推开，从而实现“沿墙滑行”的效果
+            f_total = self.escape_force + f_rep 
+            
+            self.escape_timer -= 1
+            if self.escape_timer == 0:
+                print("✅ 逃逸结束，恢复正常导航")
+
+        # --- 模式 B: 正常导航模式 ---
+        else:
+            f_att = self.calculate_attractive_force()
+            f_total = f_att + f_rep
+            f_norm = np.linalg.norm(f_total)
+
+            # 死锁检测
+            if self.enable_escape:
+                # 如果合力很小（陷入力平衡）或者 距离目标很远却停滞不前
+                if f_norm < 10 and np.linalg.norm(self.pos - self.goal) > 1.0:
+                    self.stuck_counter += 1
+                else:
+                    self.stuck_counter = 0
+                
+                # 触发逃逸 (增加敏感度，连续 10 帧卡住就触发)
+                if self.stuck_counter > 10:
+                    print("⚠️ 检测到死锁，启动强力逃逸！")
+                    self.escape_timer = 60 # 增加逃逸时间到 60 帧 (约 1.2秒)
+                    self.stuck_counter = 0
+                    
+                    # 生成随机方向，但力度一定要大
+                    rand_angle = np.random.uniform(0, 2*np.pi)
+                    direction = np.array([np.cos(rand_angle), np.sin(rand_angle)])
+                    
+                    # 技巧：给一个巨大的力，确保暂时忽略引力的影响
+                    self.escape_force = direction * 150 
+
+                    # 立即应用新力
+                    f_total = self.escape_force + f_rep
+
+        # 物理移动更新
+        f_norm_final = np.linalg.norm(f_total)
+        if f_norm_final > 0:
+            # 限制最大步长，保证动画平滑
+            step = self.step_size
+            # 如果是在逃逸，稍微跑快一点
+            if self.escape_timer > 0:
+                step = self.step_size * 1.5
+            
+            self.pos += (f_total / f_norm_final) * step
         
-        self.path.append(self.pos.copy())
+        # 边界限制
+        self.pos[0] = np.clip(self.pos[0], -2, 14)
+        self.pos[1] = np.clip(self.pos[1], -6, 6)
 
-        # 3. 判断是否到达目标 (距离小于阈值)
+        self.path.append(self.pos.copy())
+        
         if np.linalg.norm(self.pos - self.goal) < 0.2:
             self.is_reached = True
-            print("🎉 目标已到达！")
+            print("🎉 目标到达！")
 
-# --- 可视化设置 ---
-def run_simulation():
-    # 1. 设置场景
-    start_pos = [0, 0]
-    goal_pos = [10, 10]
-    # 障碍物: [x, y, 绘图半径]
-    obstacles = [
-        [3, 2, 1],
-        [6, 5, 1.5],
-        [8, 9, 1],
-        [4, 7, 1]
-    ]
 
-    robot = APF_Robot(start_pos, goal_pos, obstacles, k_att=1.0, k_rep=20.0, rr=3.0, step_size=0.1)
-
-    # 2. 初始化绘图
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_xlim(-1, 12)
-    ax.set_ylim(-1, 12)
-    ax.set_title("Artificial Potential Field (APF) Simulation")
-    ax.grid(True)
-
-    # 绘制固定元素
-    ax.plot(start_pos[0], start_pos[1], 'bs', label='Start', markersize=10)
-    ax.plot(goal_pos[0], goal_pos[1], 'r*', label='Goal', markersize=15)
-    
-    # 绘制障碍物 (圆圈)
-    for (ox, oy, r) in obstacles:
-        circle = plt.Circle((ox, oy), r/2, color='k', fill=True, alpha=0.5) # r/2 只是为了绘图好看
-        ax.add_patch(circle)
-        # 画出斥力影响范围 (虚线圆)
-        limit_circle = plt.Circle((ox, oy), 3.0, color='r', fill=False, linestyle='--', alpha=0.3)
-        ax.add_patch(limit_circle)
-
-    # 绘制机器人和轨迹
-    robot_point, = ax.plot([], [], 'go', markersize=8, label='Robot')
-    trajectory, = ax.plot([], [], 'g-', linewidth=1, label='Path')
-    
-    ax.legend(loc='upper left')
-
-    # 3. 动画更新函数
-    def update(frame):
-        if not robot.is_reached:
-            robot.step()
+# --- GUI 管理器 ---
+class APF_Demo_GUI:
+    def __init__(self):
+        self.fig, self.ax = plt.subplots(figsize=(10, 7))
+        plt.subplots_adjust(bottom=0.2)
+        self.ax.set_title("Artificial Potential Field (APF) Teaching Demo")
         
-        # 获取当前路径数据
-        path_arr = np.array(robot.path)
-        robot_point.set_data([robot.pos[0]], [robot.pos[1]]) # 必须是序列
-        trajectory.set_data(path_arr[:, 0], path_arr[:, 1])
-        return robot_point, trajectory
+        self.robot = None
+        self.anim = None
+        
+        # 绘图元素
+        self.robot_point, = self.ax.plot([], [], 'go', markersize=10, zorder=5, label='Robot')
+        self.traj_line, = self.ax.plot([], [], 'g-', linewidth=1, zorder=4, label='Path')
+        self.goal_point, = self.ax.plot([], [], 'r*', markersize=15, zorder=5, label='Goal')
+        self.obstacles_patches = []
+        self.range_patches = []
 
-    # 4. 启动动画
-    # interval=30 表示每30ms刷新一帧
-    anim = FuncAnimation(fig, update, frames=200, interval=30, blit=True)
-    
-    plt.xlabel("X (m)")
-    plt.ylabel("Y (m)")
-    print("开始仿真... 关闭窗口以退出。")
-    plt.show()
+        # 按钮
+        ax_btn1 = plt.axes([0.1, 0.05, 0.2, 0.075])
+        ax_btn2 = plt.axes([0.4, 0.05, 0.2, 0.075])
+        ax_btn3 = plt.axes([0.7, 0.05, 0.2, 0.075])
+
+        self.btn1 = Button(ax_btn1, 'Scenario 1:\nBasic', color='lightblue', hovercolor='0.975')
+        self.btn2 = Button(ax_btn2, 'Scenario 2:\nTrap (Fail)', color='salmon', hovercolor='0.975')
+        self.btn3 = Button(ax_btn3, 'Scenario 3:\nEscape (Success)', color='lightgreen', hovercolor='0.975')
+
+        self.btn1.on_clicked(self.load_scenario_basic)
+        self.btn2.on_clicked(self.load_scenario_trap)
+        self.btn3.on_clicked(self.load_scenario_escape)
+
+        self.load_scenario_basic(None)
+
+    def reset_plot(self):
+        self.ax.set_xlim(-2, 14)
+        self.ax.set_ylim(-6, 6)
+        self.ax.grid(True)
+        for p in self.obstacles_patches: p.remove()
+        for p in self.range_patches: p.remove()
+        self.obstacles_patches = []
+        self.range_patches = []
+
+    def draw_static_elements(self):
+        self.goal_point.set_data([self.robot.goal[0]], [self.robot.goal[1]])
+        for (ox, oy, r) in self.robot.obstacles:
+            c = plt.Circle((ox, oy), r/2, color='#555555', alpha=0.9) # 深灰色障碍物
+            self.ax.add_patch(c)
+            self.obstacles_patches.append(c)
+            c_range = plt.Circle((ox, oy), self.robot.rr, color='r', fill=False, linestyle='--', alpha=0.2)
+            self.ax.add_patch(c_range)
+            self.range_patches.append(c_range)
+
+    def restart_animation(self):
+        if self.anim is not None: self.anim.event_source.stop()
+        self.anim = FuncAnimation(self.fig, self.update, frames=600, interval=20, blit=True) # 增加总帧数
+        plt.draw()
+
+    def update(self, frame):
+        if self.robot and not self.robot.is_reached:
+            self.robot.step()
+            path = np.array(self.robot.path)
+            self.robot_point.set_data([self.robot.pos[0]], [self.robot.pos[1]])
+            self.traj_line.set_data(path[:, 0], path[:, 1])
+        return self.robot_point, self.traj_line, self.goal_point
+
+    # --- 场景定义 ---
+    def load_scenario_basic(self, event):
+        self.reset_plot()
+        self.ax.set_title("Scenario 1: Basic Obstacle Avoidance")
+        start = [0, 0]
+        goal = [12, 0]
+        # 简单的散乱障碍物
+        obs = [[4, 0.5, 2], [8, -1, 2], [6, 3, 1.5]]
+        self.robot = APF_Robot(start, goal, obs, enable_escape=False)
+        self.draw_static_elements()
+        self.restart_animation()
+
+    def load_scenario_trap(self, event):
+        self.reset_plot()
+        self.ax.set_title("Scenario 2: Local Minima Trap (Robot gets stuck)")
+        start = [0, 0]
+        goal = [12, 0]
+        
+        # --- 改进的陷阱设计 ---
+        # 把 U 型口稍微张开一点，不要封死
+        obs = [
+            [6.5, 2.5, 1.5], # 上方
+            [6.5, -2.5, 1.5], # 下方
+            [8.0, 0, 2.0]    # 正后方大石头
+        ]
+        # 即使只有这三个，由于斥力场半径很大(rr=3.5)，中间依然是过不去的
+        self.robot = APF_Robot(start, goal, obs, k_rep=80.0, rr=4.0, enable_escape=False)
+        self.draw_static_elements()
+        self.restart_animation()
+
+    def load_scenario_escape(self, event):
+        self.reset_plot()
+        self.ax.set_title("Scenario 3: Improved APF (Escape Strategy)")
+        start = [0, 0]
+        goal = [12, 0]
+        
+        # 使用完全相同的陷阱
+        obs = [
+            [6.5, 2.5, 1.5],
+            [6.5, -2.5, 1.5],
+            [8.0, 0, 2.0]
+        ]
+        
+        # 开启逃逸
+        self.robot = APF_Robot(start, goal, obs, k_rep=80.0, rr=4.0, enable_escape=True)
+        self.draw_static_elements()
+        self.restart_animation()
 
 if __name__ == "__main__":
-    run_simulation()
+    gui = APF_Demo_GUI()
+    plt.show()
