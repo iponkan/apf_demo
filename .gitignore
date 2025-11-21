@@ -1,0 +1,19 @@
+# --- Pixi Specific ---
+# 必须忽略：这是 Pixi 安装的本地环境文件夹（体积很大，包含二进制文件）
+.pixi/
+
+# 必须保留：pixi.lock 应该提交到 git，以保证别人和你用的包版本完全一致
+# !pixi.lock 
+
+# --- Python Standard ---
+# 字节码缓存
+__pycache__/
+*.pyc
+
+# --- IDE / Editor Settings (可选) ---
+.vscode/
+.idea/
+
+# --- OS Generated Files (可选) ---
+.DS_Store
+Thumbs.db
